@@ -175,7 +175,7 @@ def append_row_to_challan(row_values):
     except Exception as e:
         print("Append Challan failed:", e)
 
-# -------- new: write Invoice MTR back to Challan rows --------
+# -------- write Invoice MTR back to Challan rows --------
 def write_invoice_mtr_to_challan(company_name, supplier_code, items):
     """
     For each item (ch_no, desc, sac, mtr, rate, amt) written to invoice,
@@ -194,7 +194,6 @@ def write_invoice_mtr_to_challan(company_name, supplier_code, items):
         idx = {h:i for i,h in enumerate(header)}
         # ensure target column exists
         if "INVOICE_MTR" not in idx:
-            # add at end
             header.append("INVOICE_MTR")
             ws.update('A1', [header])
             all_values[0] = header
@@ -203,24 +202,21 @@ def write_invoice_mtr_to_challan(company_name, supplier_code, items):
         updates = []  # (row, col, value)
         for row_num in range(2, len(all_values)+1):  # 1-based rows, skip header
             row = all_values[row_num-1]
-            def get(col): 
+            def get(col):
                 i = idx.get(col)
                 return (row[i].strip() if i is not None and i < len(row) else "")
             firm   = get("Firm")
             scode  = get("Supplier Code")
             chno   = get("Challan_Number")
             desc   = get("Description")
-            # find matching item (first match)
             for (ch, d, sac, q, r, a) in items:
-                if firm == company_name and scode == supplier_code and str(ch).strip() == str(chno).strip() and (d or "").strip() == (desc or "").strip():
+                if (firm == company_name and scode == supplier_code and
+                    str(ch).strip() == str(chno).strip() and (d or "").strip() == (desc or "").strip()):
                     col = idx["INVOICE_MTR"] + 1  # 1-based col
                     updates.append((row_num, col, f"{float(q):.2f}"))
                     break
 
-        # batch update
         if updates:
-            cell_list = ws.range(1,1,1,1)  # dummy to get class
-            # Build A1 updates
             data = []
             for r,c,val in updates:
                 a1 = gspread.utils.rowcol_to_a1(r, c)
@@ -318,8 +314,7 @@ def draw_challan_pdf(buf, company, party, meta, items):
 
         # Partitions (flush to border, no gaps)
         part_h = 96
-        left_w = (R - L - 2) / 2  # exact half, touching each other
-        # outlines:
+        left_w = (R - L - 2) / 2
         c.rect(L+1, y-part_h, left_w, part_h)            # left partition
         c.rect(L+1+left_w, y-part_h, left_w, part_h)     # right partition
 
@@ -429,8 +424,8 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     # Partitions (Supplier details | Invoice details) — flush, no gap
     part_h = 130
     left_w = (R - L - 2) / 2
-    c.rect(L+1, y-part_h, left_w, part_h)            # left partition
-    c.rect(L+1+left_w, y-part_h, left_w, part_h)     # right partition
+    c.rect(L+1, y-part_h, left_w, part_h)
+    c.rect(L+1+left_w, y-part_h, left_w, part_h)
 
     # Supplier details
     c.setFont("Helvetica-Bold", 10)
@@ -817,7 +812,11 @@ addRow();
 
   <h3>Items (max {{ INV_MAX_ROWS }})</h3>
   <table id="items">
-    <thead><tr><th>Ch. No</th><th>Description</th><th class="right">MTR</th><th class="right">Rate</th><th></th></tr></thead>
+    <thead>
+      <tr>
+        <th>Ch. No</th><th>Description</th><th class="right">MTR</th><th class="right">Rate</th><th></th>
+      </tr>
+    </thead>
     <tbody></tbody>
   </table>
   <p><button type="button" class="btn small" onclick="addRow()">Add Row</button></p>
@@ -826,18 +825,31 @@ addRow();
 </form>
 
 <script>
-const SUPPLIERS = {{ suppliers|tojson }};
+const SUPPLIERS    = {{ suppliers|tojson }};
 const CHALLAN_ROWS = {{ challans|tojson }};
 const INV_MAX_ROWS = {{ INV_MAX_ROWS|int }};
 
+function addRow(prefill){
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td><input name="ch[]"  value="${prefill?.ch ?? ''}"></td>
+    <td><input name="desc[]" value="${prefill?.desc ?? ''}" required></td>
+    <td class="right"><input name="qty[]"  type="number" step="0.01" min="0.01" value="${prefill?.qty ?? ''}" required></td>
+    <td class="right"><input name="rate[]" type="number" step="0.01" min="0"     value="${prefill?.rate ?? ''}" required></td>
+    <td><button class="btn secondary small" type="button" onclick="this.closest('tr').remove()">Delete</button></td>`;
+  document.querySelector('#items tbody').appendChild(tr);
+  return tr;
+}
+addRow(); // one empty row
+
 function fillSupplier(){
   const code = document.getElementById('inv_supplier_code').value;
-  const s = SUPPLIERS[code]; 
+  const s = SUPPLIERS[code];
   if(s){
-    document.getElementById('inv_name').value = s.name || '';
-    document.getElementById('inv_gstin').value = s.gstin || '';
-    document.getElementById('inv_mobile').value = s.mobile || '';
-    document.getElementById('inv_address').value = s.address || '';
+    document.getElementById('inv_name').value    = s.name   || '';
+    document.getElementById('inv_gstin').value   = s.gstin  || '';
+    document.getElementById('inv_mobile').value  = s.mobile || '';
+    document.getElementById('inv_address').value = s.address|| '';
   }
   refreshChallanOptions();
 }
@@ -846,13 +858,13 @@ document.getElementById('inv_supplier_code').addEventListener('blur', fillSuppli
 document.getElementById('inv_firm').addEventListener('change', refreshChallanOptions);
 
 function refreshChallanOptions(){
-  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
+  const firm  = (document.getElementById('inv_firm').value || '').toUpperCase();
   const scode = document.getElementById('inv_supplier_code').value || '';
-  const sel = document.getElementById('inv_import_challan');
+  const sel   = document.getElementById('inv_import_challan');
   sel.innerHTML = '<option value="">-- select challan --</option>';
   if(!firm || !scode) return;
 
-  // only challans where every row has blank INVOICE_MTR
+  // group rows by challan number
   const grouped = {};
   CHALLAN_ROWS.forEach(r=>{
     const rf = String(r['Firm']||'').toUpperCase();
@@ -861,15 +873,47 @@ function refreshChallanOptions(){
     const ch = String(r['Challan_Number']||'').trim();
     if(!ch) return;
     if(!grouped[ch]) grouped[ch] = [];
-    grouped[ch].append(r);
+    grouped[ch].push(r);
   });
 
   Object.keys(grouped).sort().forEach(ch=>{
     const rows = grouped[ch];
-    const invoiced = rows.some(x => String(x['INVOICE_MTR'] or x.get?.('INVOICE_MTR','')).strip() if False else str(x.get('INVOICE_MTR','')).strip())  # noqa
+    const invoiced = rows.some(x => String(x['INVOICE_MTR']||'').trim() !== '');
+    if(invoiced) return; // hide challan already invoiced (any row)
+    const firstDesc = (rows[0] && rows[0]['Description']) ? String(rows[0]['Description']).slice(0,28) : '';
+    const opt = document.createElement('option');
+    opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
+    sel.appendChild(opt);
   });
-  // JS can't evaluate Python; do JS below instead (we just needed grouping in JS)
 }
+
+function addFromChallan(){
+  const firm  = (document.getElementById('inv_firm').value || '').toUpperCase();
+  const scode = document.getElementById('inv_supplier_code').value || '';
+  const chSel = document.getElementById('inv_import_challan').value || '';
+  if(!firm || !scode || !chSel) return;
+
+  const rows = CHALLAN_ROWS.filter(r =>
+    String(r['Firm']||'').toUpperCase() === firm &&
+    String(r['Supplier Code']||'') === scode &&
+    String(r['Challan_Number']||'').trim() === chSel
+  );
+
+  const tbody = document.querySelector('#items tbody');
+  let current = tbody.querySelectorAll('tr').length;
+  for(const r of rows){
+    if(current >= INV_MAX_ROWS) break;
+    const desc = String(r['Description']||'');
+    const qty  = (r['Qty']!==undefined && r['Qty']!==null) ? String(r['Qty']) :
+                 (r['MTR']!==undefined && r['MTR']!==null) ? String(r['MTR']) : '';
+    addRow({ ch: chSel, desc: desc, qty: qty, rate: '' });
+    current++;
+  }
+}
+
+window.addEventListener('DOMContentLoaded', ()=>{
+  refreshChallanOptions();
+});
 </script>
 {% endblock %}
 """
@@ -1079,8 +1123,8 @@ def invoice():
             sup_code,                         # Supplier Code
             sup["name"],                      # Supplier_Name
             sup["gstin"],                     # Gst_No
-            str(ch or ""),                    # Challan_Number  (NEW)
-            d,                                # Description    (item desc)
+            str(ch or ""),                    # Challan_Number
+            d,                                # Description
             f"{q:.2f}",                       # Qty
             f"{a:.2f}",                       # Amount
             f"{row_taxable:.2f}",             # Taxable_Amount
@@ -1092,58 +1136,11 @@ def invoice():
             int(round(row_gross)),            # Grand_Total
         ])
 
-    # NEW: write back MTR to Challan rows (INVOICE_MTR)
+    # write back MTR to Challan rows (INVOICE_MTR)
     write_invoice_mtr_to_challan(company["company_name"], sup_code, items)
 
     filename = _unique_name(f"Invoice_{sup['name'] or 'Supplier'}_{inv_no}.pdf")
     return send_file(buf, as_attachment=True, download_name=filename, mimetype="application/pdf")
-
-# ==============================
-# Inject extra JS (client-side challan filter had one leftover Python bit)
-# Replace invoice template's refreshChallanOptions() using after_request
-# ==============================
-@app.after_request
-def patch_client_js(resp):
-    try:
-        if resp.mimetype == "text/html" and b"CHALLAN_ROWS" in resp.response[0]:
-            html = resp.response[0].decode("utf-8")
-            # proper JS for filtering (hide challans if any row has INVOICE_MTR)
-            snippet = """
-function refreshChallanOptions(){
-  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
-  const scode = document.getElementById('inv_supplier_code').value || '';
-  const sel = document.getElementById('inv_import_challan');
-  sel.innerHTML = '<option value="">-- select challan --</option>';
-  if(!firm || !scode) return;
-
-  const grouped = {};
-  CHALLAN_ROWS.forEach(r=>{
-    const rf = String(r['Firm']||'').toUpperCase();
-    const rc = String(r['Supplier Code']||'');
-    if(rf!==firm || rc!==scode) return;
-    const ch = String(r['Challan_Number']||'').trim();
-    if(!ch) return;
-    if(!grouped[ch]) grouped[ch] = [];
-    grouped[ch].push(r);
-  });
-
-  Object.keys(grouped).sort().forEach(ch=>{
-    const rows = grouped[ch];
-    const invoiced = rows.some(x => String(x['INVOICE_MTR']||'').trim() !== '');
-    if(invoiced) return; // hide invoiced challan
-    const first = rows[0];
-    const firstDesc = (first && first['Description']) ? String(first['Description']).slice(0,24) : '';
-    const opt = document.createElement('option');
-    opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
-    sel.appendChild(opt);
-  });
-}
-"""
-            html = html.replace("refreshChallanOptions();", snippet + "\nrefreshChallanOptions();")
-            resp.set_data(html.encode("utf-8"))
-    except Exception:
-        pass
-    return resp
 
 # ==============================
 # Main
