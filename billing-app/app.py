@@ -834,7 +834,9 @@ document.getElementById('challanForm').addEventListener('submit', async (e)=>{
         <button type="button" class="btn small" onclick="addFromChallan()">Add From Challan</button>
       </div>
     </div>
-    <small>List is filtered by selected Firm + Supplier Code. A challan is hidden if any of its rows has <b>INVOICE_MTR</b> filled.</small>
+    <small>
+      List is filtered by selected Firm + Supplier Code. A challan is shown only if it has at least one row with empty <b>INVOICE_MTR</b>. When adding, only the not-yet-invoiced rows are inserted.
+    </small>
   </div>
 
   <h3>Items (max {{ INV_MAX_ROWS }})</h3>
@@ -891,7 +893,7 @@ function refreshChallanOptions(){
   sel.innerHTML = '<option value="">-- select challan --</option>';
   if(!firm || !scode) return;
 
-  // group rows by challan number
+  // group rows by challan number for this firm+supplier
   const grouped = {};
   CHALLAN_ROWS.forEach(r=>{
     const rf = String(r['Firm']||'').toUpperCase();
@@ -903,13 +905,15 @@ function refreshChallanOptions(){
     grouped[ch].push(r);
   });
 
+  // Show challan if it has at least one UNINVOICED row (INVOICE_MTR is blank)
   Object.keys(grouped).sort().forEach(ch=>{
     const rows = grouped[ch];
-    const invoiced = rows.some(x => String(x['INVOICE_MTR']||'').trim() !== '');
-    if(invoiced) return; // hide challan already invoiced (any row)
-    const firstDesc = (rows[0] && rows[0]['Description']) ? String(rows[0]['Description']).slice(0,28) : '';
+    const hasUninvoiced = rows.some(x => String(x['INVOICE_MTR']||'').trim() === '');
+    if(!hasUninvoiced) return; // hide fully invoiced challan
+    const firstDesc = (rows.find(x => String(x['INVOICE_MTR']||'').trim() === '')?.['Description']) || rows[0]['Description'] || '';
+    const short = String(firstDesc).slice(0,28);
     const opt = document.createElement('option');
-    opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
+    opt.value = ch; opt.textContent = short ? `${ch} (${short})` : ch;
     sel.appendChild(opt);
   });
 }
@@ -925,7 +929,8 @@ function addFromChallan(){
   const rows = CHALLAN_ROWS.filter(r =>
     String(r['Firm']||'').toUpperCase() === firm &&
     String(r['Supplier Code']||'') === scode &&
-    String(r['Challan_Number']||'').trim() === chSel
+    String(r['Challan_Number']||'').trim() === chSel &&
+    String(r['INVOICE_MTR']||'').trim() === '' // <-- ONLY rows not yet invoiced
   );
 
   const tbody = document.querySelector('#items tbody');
@@ -1212,4 +1217,4 @@ def invoice():
 # Main
 # ==============================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=True)
+  app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=True)
