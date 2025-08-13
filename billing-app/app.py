@@ -2,22 +2,11 @@
 # - Deployable on Railway (or any host)
 # - Secrets via ENV: SPREADSHEET_ID, GOOGLE_SA_JSON, SESSION_SECRET
 # - Login reads ID/PASS from Google Sheet tab "PASS" (A2=id, B2=pass)
-# - "Remember me" keeps you signed in for 30 days (secure cookie)
 # - Challan: 2 copies per page, 5 rows, no GST/discount, logs to "Challan"
 # - Invoice: GST @ env GST_TOTAL (default 5%), global SAC, logs to "Invoice"
 # - Firms from "ID" tab, Suppliers from "Supplier" tab
 #
-# pip install:
-#   flask gspread google-auth reportlab gunicorn
-#
-# env to set (Railway → Variables):
-#   SPREADSHEET_ID   = <your Google Sheet ID>
-#   GOOGLE_SA_JSON   = <entire service account JSON as one string>
-#   SESSION_SECRET   = <random long string>
-# (optional)
-#   GST_TOTAL        = 5.0
-#   ID_TAB_NAME / SUPPLIER_TAB_NAME / CHALLAN_TAB_NAME / INVOICE_TAB_NAME / PASS_TAB_NAME
-#   SAC_DEFAULT
+# pip install: flask gspread google-auth reportlab gunicorn
 
 import os, re, io, json
 from datetime import datetime, timedelta
@@ -41,7 +30,7 @@ from jinja2 import DictLoader
 # Config from ENV
 # ==============================
 SPREADSHEET_ID   = os.getenv("SPREADSHEET_ID")        # required
-GOOGLE_SA_JSON   = os.getenv("GOOGLE_SA_JSON")        # service account JSON as a single env var
+GOOGLE_SA_JSON   = os.getenv("GOOGLE_SA_JSON")        # service account JSON (single env var)
 SESSION_SECRET   = os.getenv("SESSION_SECRET", "change-me")
 
 # Sheet names
@@ -86,8 +75,7 @@ def load_firms():
         header = [h.strip().lower() for h in rows[0]]
         idx = {h:i for i,h in enumerate(header)}
         def val(r, name):
-            i = idx.get(name.lower())
-            return (r[i].strip() if i is not None and i < len(r) else "")
+            i = idx.get(name.lower());  return (r[i].strip() if i is not None and i < len(r) else "")
         out = {}
         for r in rows[1:]:
             if not r or not any(r): continue
@@ -109,8 +97,7 @@ def load_firms():
             }
         return out
     except Exception as e:
-        print("Firms load error:", e)
-        return {}
+        print("Firms load error:", e);  return {}
 
 def load_suppliers():
     try:
@@ -128,8 +115,15 @@ def load_suppliers():
             }
         return out
     except Exception as e:
-        print("Suppliers load error:", e)
-        return {}
+        print("Suppliers load error:", e);  return {}
+
+def load_challan_rows():
+    """Return list of challan rows (used to import into Invoice)."""
+    try:
+        ws = _ws(CHALLAN_TAB_NAME)
+        return ws.get_all_records()
+    except Exception as e:
+        print("Challan load error:", e);  return []
 
 def get_next_invoice_number():
     try:
@@ -138,7 +132,8 @@ def get_next_invoice_number():
         max_num = 0
         for r in rows:
             raw = str(r.get("Invoice_Number","")).strip()
-            num = int(raw) if raw.isdigit() else (int(re.search(r"(\d+)$", raw).group(1)) if re.search(r"(\d+)$", raw) else None)
+            m = re.search(r"(\d+)$", raw)
+            num = int(raw) if raw.isdigit() else (int(m.group(1)) if m else None)
             if isinstance(num, int) and num > max_num: max_num = num
         return str(max_num + 1 if max_num > 0 else 1)
     except Exception:
@@ -153,38 +148,30 @@ def get_next_challan_number():
             raw = str(r.get("Challan_Number","")).strip()
             m = re.search(r"(\d+)$", raw)
             num = int(raw) if raw.isdigit() else (int(m.group(1)) if m else None)
-            if isinstance(num, int) and num > max_num:
-                max_num = num
+            if isinstance(num, int) and num > max_num: max_num = num
         return str(max_num + 1 if max_num > 0 else 1)
     except Exception:
         return "1"
 
-
 def check_login_from_sheet(username, password):
-    """
-    PASS sheet:
-      A2 = ID, B2 = PASS
-    """
+    """PASS sheet: A2 = ID, B2 = PASS"""
     try:
         ws = _ws(PASS_TAB_NAME)
         uid  = ws.acell("A2").value or ""
         upwd = ws.acell("B2").value or ""
         return (username.strip() == (uid or "").strip()) and (password.strip() == (upwd or "").strip())
     except Exception as e:
-        print("PASS sheet error:", e)
-        return False
+        print("PASS sheet error:", e);  return False
 
 def append_row_to_invoice(row_values):
     try:
-        ws = _ws(INVOICE_TAB_NAME)
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
+        _ws(INVOICE_TAB_NAME).append_row(row_values, value_input_option="USER_ENTERED")
     except Exception as e:
         print("Append Invoice failed:", e)
 
 def append_row_to_challan(row_values):
     try:
-        ws = _ws(CHALLAN_TAB_NAME)
-        ws.append_row(row_values, value_input_option="USER_ENTERED")
+        _ws(CHALLAN_TAB_NAME).append_row(row_values, value_input_option="USER_ENTERED")
     except Exception as e:
         print("Append Challan failed:", e)
 
@@ -223,6 +210,29 @@ def _unique_name(base="file.pdf"):
         name = f"{stem}_{i}{ext}"; i += 1
     return name
 
+# Amount in words (Indian numbering)
+def _num_words(n):
+    units = ["","One","Two","Three","Four","Five","Six","Seven","Eight","Nine",
+             "Ten","Eleven","Twelve","Thirteen","Fourteen","Fifteen","Sixteen",
+             "Seventeen","Eighteen","Nineteen"]
+    tens  = ["","Ten","Twenty","Thirty","Forty","Fifty","Sixty","Seventy","Eighty","Ninety"]
+    def two(x):
+        return units[x] if x < 20 else tens[x//10] + ((" " + units[x%10]) if x%10 else "")
+    def three(x):
+        h=x//100; r=x%100
+        return (units[h]+" Hundred " + two(r)).strip() if h and r else (units[h]+" Hundred" if h else two(r))
+    if n == 0: return "Zero"
+    s=""; cr=n//10000000; n%=10000000
+    la=n//100000;  n%=100000
+    th=n//1000;    n%=1000
+    if cr: s+=three(cr)+" Crore "
+    if la: s+=three(la)+" Lakh "
+    if th: s+=three(th)+" Thousand "
+    if n:  s+=three(n)
+    return " ".join(s.split())
+
+def _rupees_words(v):  return f"{_num_words(int(round(v)))} Rupees Only"
+
 # --------- Draw Challan (two copies) ---------
 def draw_challan_pdf(buf, company, party, meta, items):
     c = canvas.Canvas(buf, pagesize=A4)
@@ -250,7 +260,7 @@ def draw_challan_pdf(buf, company, party, meta, items):
         for ln in _wrap(f"Address: {company['addr']}", inner_w):
             c.drawString(L+8, ay, ln); ay -= 12
         c.drawString(L+8, ay, f"Mobile: {company['mobile']}   |   GST No.: {company['gst']}")
-        y = ay - 24   # extra spacing so text doesn't touch the boxes
+        y = ay - 24   # spacing so text doesn't touch the boxes
 
         left_w  = (R-L-6)/2
         right_w = left_w
@@ -260,8 +270,7 @@ def draw_challan_pdf(buf, company, party, meta, items):
         c.drawString(L+8, y-16, f"Party Details - {party.get('name') or '—'}")
         c.setFont("Helvetica", 9)
         join_vals = " | ".join([v for v in [party.get('gstin'), party.get('mobile')] if v])
-        if join_vals:
-            c.drawString(L+8, y-32, join_vals)
+        if join_vals: c.drawString(L+8, y-32, join_vals)
         label = "Address: "; label_w = pdfmetrics.stringWidth(label, "Helvetica", 9)
         addr_wrapped = _wrap((party.get('address') or ""), (left_w - 16) - label_w)[:2]
         c.drawString(L+8, y-46, label + (addr_wrapped[0] if addr_wrapped else ""))
@@ -275,7 +284,7 @@ def draw_challan_pdf(buf, company, party, meta, items):
         c.drawString(mx,     y-34, f"Challan No.: {meta['no']}")
         c.drawString(mx,     y-50, f"Date: {meta['date']}")
 
-        # Smaller inner boxes (exactly height 96 as requested)
+        # Smaller inner boxes
         c.rect(L+1, y-96, left_w, 96)
         c.rect(L+3+left_w, y-96, right_w, 96)
 
@@ -302,21 +311,15 @@ def draw_challan_pdf(buf, company, party, meta, items):
         for r in range(CH_MAX_ROWS):
             row_y = data_top_y - (r*18) - 12
             x = L+1
-            if r < len(items):
-                desc, mtr, rate, amt = items[r]
-                c.drawRightString(x+w_no-6, row_y, str(r+1))
+            if r < len(items): c.drawRightString(x+w_no-6, row_y, str(r+1))
             x += w_no
-            if r < len(items):
-                c.drawString(x+6, row_y, (items[r][0] or "")[:60])
+            if r < len(items): c.drawString(x+6, row_y, (items[r][0] or "")[:60])
             x += w_desc
-            if r < len(items):
-                c.drawRightString(x+w_mtr-6, row_y, f"{float(items[r][1]):.2f}")
+            if r < len(items): c.drawRightString(x+w_mtr-6, row_y, f"{float(items[r][1]):.2f}")
             x += w_mtr
-            if r < len(items):
-                c.drawRightString(x+w_rate-6, row_y, f"{float(items[r][2]):.2f}")
+            if r < len(items): c.drawRightString(x+w_rate-6, row_y, f"{float(items[r][2]):.2f}")
             x += w_rate
-            if r < len(items):
-                c.drawRightString(x+w_amt-6, row_y, f"{float(items[r][3]):.2f}")
+            if r < len(items): c.drawRightString(x+w_amt-6, row_y, f"{float(items[r][3]):.2f}")
 
         # Grand Total
         sub_y_top = data_top_y - data_h
@@ -327,7 +330,7 @@ def draw_challan_pdf(buf, company, party, meta, items):
         total_val = sum(float(a) for *_, a in items)
         c.drawRightString(L+1+table_w-6, sub_y_top-12, f"{total_val:.2f}")
 
-        # Signatures (below table, with padding)
+        # Signatures
         sig_top = sub_y_top - 26
         c.setFont("Helvetica", 9)
         c.drawString(L+10, sig_top-30, "Receiver's Signature")
@@ -348,6 +351,7 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     L, R, T, B = 24, width-24, height-24, 42
     c.setLineWidth(0.7); c.rect(L, B, R-L, T-B)
 
+    # Header
     band_h = 26
     c.setFillColorRGB(0.93,0.93,0.93)
     c.rect(L+1, T-band_h, R-L-2, band_h, fill=1, stroke=1)
@@ -366,12 +370,11 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     for ln in _wrap(f"Address: {company['addr']}", inner_w):
         c.drawString(L+10, ay, ln); ay -= 12
     c.drawString(L+10, ay, f"Mobile: {company['mobile']}   |   GST No.: {company['gst']}")
-    y = ay - 24  # extra spacing so the supplier box doesn't touch
+    y = ay - 24  # space before boxes
 
-    # Supplier & meta
+    # Supplier & meta (boxes slightly taller)
     left_w  = (R-L-6)/2
     right_w = left_w
-    # Slightly larger boxes to avoid overlap
     c.rect(L+1, y-130, left_w, 130)
     c.rect(L+3+left_w, y-130, right_w, 130)
 
@@ -421,28 +424,22 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     for r in range(INV_MAX_ROWS):
         row_y = data_top_y - (r*18) - 12
         x = L+1
-        if r < len(items):
-            ch, desc, sac, mtr, rate, amt = items[r]
-            c.drawString(x+6, row_y, str(ch or ""))
+        if r < len(items): c.drawString(x+6, row_y, str(items[r][0] or ""))
         x += w_ch
-        if r < len(items):
-            c.drawString(x+6, row_y, (desc or "")[:50])
+        if r < len(items): c.drawString(x+6, row_y, (items[r][1] or "")[:50])
         x += w_desc
-        if r < len(items):
-            c.drawString(x+6, row_y, sac or SAC_DEFAULT)
+        if r < len(items): c.drawString(x+6, row_y, items[r][2] or SAC_DEFAULT)
         x += w_sac
-        if r < len(items):
-            c.drawRightString(x+w_mtr-6, row_y, f"{float(mtr):.2f}")
+        if r < len(items): c.drawRightString(x+w_mtr-6, row_y, f"{float(items[r][3]):.2f}")
         x += w_mtr
-        if r < len(items):
-            c.drawRightString(x+w_rate-6, row_y, f"{float(rate):.2f}")
+        if r < len(items): c.drawRightString(x+w_rate-6, row_y, f"{float(items[r][4]):.2f}")
         x += w_rate
-        if r < len(items):
-            c.drawRightString(x+w_amt-6, row_y, f"{float(amt):.2f}")
+        if r < len(items): c.drawRightString(x+w_amt-6, row_y, f"{float(items[r][5]):.2f}")
 
     # Totals
     sub_total = sum(float(i[5]) for i in items)
-    taxable = max(sub_total - float(discount or 0), 0.0)
+    discount = float(discount or 0)
+    taxable = max(sub_total - discount, 0.0)
     cgst = taxable * (CGST_RATE/100.0)
     sgst = taxable * (SGST_RATE/100.0)
     gross = taxable + cgst + sgst
@@ -457,26 +454,57 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     c.rect(L+1+w_ch+w_desc+w_sac+w_mtr+w_rate, sub_y_top-18, w_amt, 18)
     c.drawRightString(L+1+table_w-6, sub_y_top-12, f"{sub_total:.2f}")
 
-    # Simple summary at right
-    ybot = sub_y_top - 20
-    right_x = L+1 + table_w/2 + 10
-    c.setFont("Helvetica-Bold", 9)
-    c.drawString(right_x, ybot-12, "Summary")
-    c.setFont("Helvetica", 9)
-    yy = ybot-26
-    def line(lbl, v):
-        nonlocal yy
-        c.drawString(right_x, yy, f"{lbl}:")
-        c.drawRightString(L+1+table_w-6, yy, v); yy -= 14
+    # Bottom area (Amounts in Words + Bank details + Summary)
+    ybot = sub_y_top - 26
+    bottom_h = 200
+    c.rect(L+1, ybot-bottom_h, table_w, bottom_h)
 
-    line("Taxable Amount", f"{taxable:.2f}")
-    line("Discount", f"{float(discount or 0):.2f}")
-    line(f"CGST ({CGST_RATE:.1f}%)", f"{cgst:.2f}")
-    line(f"SGST ({SGST_RATE:.1f}%)", f"{sgst:.2f}")
-    line("Round Off", f"{round_off:+.2f}")
+    left_w2 = table_w/2
+    words_h = 110
+    bank_h  = bottom_h - words_h
+
+    # Amounts in Words
+    c.rect(L+1, ybot-words_h, left_w2, words_h)
+    c.setFont("Helvetica-Bold", 10); c.drawString(L+8, ybot-16, "Amounts in Words:")
+    c.setFont("Helvetica", 9)
+    xw = L+8; yline = ybot-32
+    for label, text in [("Taxable", _rupees_words(taxable)),
+                        ("GST",     _rupees_words(cgst + sgst)),
+                        ("Total",   _rupees_words(rounded))]:
+        for wln in _wrap(f"{label}: {text}", left_w2-16):
+            c.drawString(xw, yline, wln); yline -= 12
+
+    # Bank box
+    c.rect(L+1, ybot-bottom_h, left_w2, bank_h)
+    c.setFont("Helvetica-Bold", 10); c.drawString(L+8, ybot-words_h-16, "Bank Details:")
+    c.setFont("Helvetica", 9)
+    by = ybot-words_h-32
+    for line in company.get("bank_lines", []):
+        c.drawString(L+8, by, line); by -= 12
+
+    # Summary (right)
+    c.rect(L+1+left_w2, ybot-bottom_h, left_w2, bottom_h)
+    rx = L+10+left_w2; rv = L+1+left_w2 + left_w2 - 8
+    c.setFont("Helvetica-Bold", 10); c.drawString(rx, ybot-16, "Summary")
+    c.setFont("Helvetica-Bold", 9)
+    yy = ybot-32
+    def pr(lbl,val):
+        nonlocal yy
+        c.drawString(rx, yy, f"{lbl}:"); c.drawRightString(rv, yy, val); yy -= 14
+    pr("Taxable Amount", f"{taxable:.2f}")
+    pr("Discount", f"{discount:.2f}")
+    pr(f"CGST ({CGST_RATE:.1f}%)", f"{cgst:.2f}")
+    pr(f"SGST ({SGST_RATE:.1f}%)", f"{sgst:.2f}")
+    pr("Round Off", f"{round_off:+.2f}")
     c.setFont("Helvetica-Bold", 10)
-    c.drawString(right_x, yy-2, "Grand Total (₹)")
-    c.drawRightString(L+1+table_w-6, yy-2, f"{int(round(rounded))}")
+    c.drawString(rx, yy-2, "Grand Total (₹)")
+    c.drawRightString(rv, yy-2, f"{int(round(rounded))}")
+
+    # Signatures at page bottom (outside boxes)
+    c.setFont("Helvetica", 9)
+    c.drawString(L+10, B+22, "Customer Signature")
+    c.drawRightString(R-10, B+22, f"For {company['company_name']}")
+    c.drawRightString(R-10, B+8, "Authorised Signatory")
 
     c.save()
 
@@ -590,7 +618,7 @@ TEMPLATES = {
   <div class="row">
     <div class="grow">
       <label>Firm</label><br>
-      <select name="firm_key" required>
+      <select name="firm_key" id="ch_firm" required>
         {% for k, v in firms.items() %}
           <option value="{{k}}" {{ 'selected' if k == firm_default else '' }}>{{ v.company_name }}</option>
         {% endfor %}
@@ -609,7 +637,7 @@ TEMPLATES = {
   <div class="row">
     <div class="grow">
       <label>Party Code</label><br>
-      <select name="party_code">
+      <select name="party_code" id="ch_party_code">
         <option value="">-- optional --</option>
         {% for code, s in suppliers.items() %}
           <option value="{{code}}">{{ code }} - {{ s.name }}</option>
@@ -619,12 +647,12 @@ TEMPLATES = {
   </div>
 
   <div class="row">
-    <div class="grow"><label>Party Name</label><br><input name="party_name"></div>
-    <div class="grow"><label>GSTIN</label><br><input name="party_gstin"></div>
-    <div class="grow"><label>Mobile</label><br><input name="party_mobile"></div>
+    <div class="grow"><label>Party Name</label><br><input name="party_name" id="ch_name"></div>
+    <div class="grow"><label>GSTIN</label><br><input name="party_gstin" id="ch_gstin"></div>
+    <div class="grow"><label>Mobile</label><br><input name="party_mobile" id="ch_mobile"></div>
   </div>
   <div class="row">
-    <div class="grow"><label>Address</label><br><textarea name="party_address" rows="2"></textarea></div>
+    <div class="grow"><label>Address</label><br><textarea name="party_address" id="ch_address" rows="2"></textarea></div>
   </div>
 
   <h3>Items (max {{ CH_MAX_ROWS }})</h3>
@@ -638,6 +666,18 @@ TEMPLATES = {
 </form>
 
 <script>
+const SUPPLIERS = {{ suppliers|tojson }};
+function fillParty(){
+  const code = document.getElementById('ch_party_code').value;
+  const s = SUPPLIERS[code]; if(!s) return;
+  document.getElementById('ch_name').value = s.name || '';
+  document.getElementById('ch_gstin').value = s.gstin || '';
+  document.getElementById('ch_mobile').value = s.mobile || '';
+  document.getElementById('ch_address').value = s.address || '';
+}
+document.getElementById('ch_party_code').addEventListener('change', fillParty);
+document.getElementById('ch_party_code').addEventListener('blur', fillParty);
+
 function addRow(){
   const tr = document.createElement('tr');
   tr.innerHTML = `
@@ -660,7 +700,7 @@ addRow();
   <div class="row">
     <div class="grow">
       <label>Firm</label><br>
-      <select name="firm_key" required>
+      <select name="firm_key" id="inv_firm" required>
         {% for k, v in firms.items() %}
           <option value="{{k}}" {{ 'selected' if k == firm_default else '' }}>{{ v.company_name }}</option>
         {% endfor %}
@@ -679,7 +719,7 @@ addRow();
   <div class="row">
     <div class="grow">
       <label>Supplier Code</label><br>
-      <select name="supplier_code">
+      <select name="supplier_code" id="inv_supplier_code">
         <option value="">-- optional --</option>
         {% for code, s in suppliers.items() %}
           <option value="{{code}}">{{ code }} - {{ s.name }}</option>
@@ -697,12 +737,28 @@ addRow();
   </div>
 
   <div class="row">
-    <div class="grow"><label>Supplier Name</label><br><input name="supplier_name"></div>
-    <div class="grow"><label>GSTIN</label><br><input name="supplier_gstin"></div>
-    <div class="grow"><label>Mobile</label><br><input name="supplier_mobile"></div>
+    <div class="grow"><label>Supplier Name</label><br><input name="supplier_name" id="inv_name"></div>
+    <div class="grow"><label>GSTIN</label><br><input name="supplier_gstin" id="inv_gstin"></div>
+    <div class="grow"><label>Mobile</label><br><input name="supplier_mobile" id="inv_mobile"></div>
   </div>
   <div class="row">
-    <div class="grow"><label>Address</label><br><textarea name="supplier_address" rows="2"></textarea></div>
+    <div class="grow"><label>Address</label><br><textarea name="supplier_address" id="inv_address" rows="2"></textarea></div>
+  </div>
+
+  <!-- Import from Challan -->
+  <div class="card" style="margin-top:8px;">
+    <div class="row">
+      <div class="grow">
+        <label>Import items from Challan</label><br>
+        <select id="inv_import_challan">
+          <option value="">-- select challan --</option>
+        </select>
+      </div>
+      <div style="align-self:flex-end">
+        <button type="button" class="btn small" onclick="addFromChallan()">Add From Challan</button>
+      </div>
+    </div>
+    <small>List is filtered by selected Firm + Supplier Code. Labels show "ChallanNo (first item)".</small>
   </div>
 
   <h3>Items (max {{ INV_MAX_ROWS }})</h3>
@@ -716,17 +772,81 @@ addRow();
 </form>
 
 <script>
-function addRow(){
+const SUPPLIERS = {{ suppliers|tojson }};
+const CHALLAN_ROWS = {{ challans|tojson }};
+const INV_MAX_ROWS = {{ INV_MAX_ROWS|int }};
+
+function fillSupplier(){
+  const code = document.getElementById('inv_supplier_code').value;
+  const s = SUPPLIERS[code]; if(!s) { refreshChallanOptions(); return; }
+  document.getElementById('inv_name').value = s.name || '';
+  document.getElementById('inv_gstin').value = s.gstin || '';
+  document.getElementById('inv_mobile').value = s.mobile || '';
+  document.getElementById('inv_address').value = s.address || '';
+  refreshChallanOptions();
+}
+document.getElementById('inv_supplier_code').addEventListener('change', fillSupplier);
+document.getElementById('inv_supplier_code').addEventListener('blur', fillSupplier);
+document.getElementById('inv_firm').addEventListener('change', refreshChallanOptions);
+
+function refreshChallanOptions(){
+  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
+  const scode = document.getElementById('inv_supplier_code').value || '';
+  const sel = document.getElementById('inv_import_challan');
+  sel.innerHTML = '<option value="">-- select challan --</option>';
+  if(!firm || !scode) return;
+  const seen = new Set();
+  CHALLAN_ROWS.forEach(r=>{
+    const rf = String(r['Firm']||'').toUpperCase();
+    const rc = String(r['Supplier Code']||'');
+    const ch = String(r['Challan_Number']||'').trim();
+    if(rf===firm && rc===scode && ch){
+      if(!seen.has(ch)){
+        // find first row for description preview
+        const first = CHALLAN_ROWS.find(rr => String(rr['Challan_Number']).trim()===ch && String(rr['Supplier Code']||'')===scode && String(rr['Firm']||'').toUpperCase()===firm);
+        const firstDesc = (first && first['Description']) ? String(first['Description']).slice(0,24) : '';
+        const opt = document.createElement('option');
+        opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
+        sel.appendChild(opt);
+        seen.add(ch);
+      }
+    }
+  });
+}
+
+function addRow(ch='', desc='', qty='', rate=''){
+  const tbody = document.querySelector('#items tbody');
+  if(tbody.querySelectorAll('tr').length >= INV_MAX_ROWS) return;
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td><input name="ch[]" placeholder=""></td>
-    <td><input name="desc[]" required></td>
-    <td class="right"><input name="qty[]" type="number" step="0.01" min="0.01" required></td>
-    <td class="right"><input name="rate[]" type="number" step="0.01" min="0" required></td>
+    <td><input name="ch[]" value="${ch}"></td>
+    <td><input name="desc[]" value="${desc}" required></td>
+    <td class="right"><input name="qty[]" type="number" step="0.01" min="0.01" value="${qty}" required></td>
+    <td class="right"><input name="rate[]" type="number" step="0.01" min="0" value="${rate}" required></td>
     <td><button class="btn secondary small" type="button" onclick="this.closest('tr').remove()">Delete</button></td>`;
-  document.querySelector('#items tbody').appendChild(tr);
+  tbody.appendChild(tr);
 }
-addRow();
+
+function addFromChallan(){
+  const ch = document.getElementById('inv_import_challan').value;
+  if(!ch) return;
+  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
+  const scode = document.getElementById('inv_supplier_code').value || '';
+  const rows = CHALLAN_ROWS.filter(r => String(r['Challan_Number']).trim()===ch && String(r['Supplier Code']||'')===scode && String(r['Firm']||'').toUpperCase()===firm);
+  const tbody = document.querySelector('#items tbody');
+  for(const r of rows){
+    if(tbody.querySelectorAll('tr').length >= INV_MAX_ROWS) break;
+    const d = String(r['Description']||'');
+    const q = parseFloat(String(r['Qty']||'0')) || 0;
+    const amt = parseFloat(String(r['Amount']||'0')) || 0;
+    const rate = q>0 ? (amt/q) : 0;
+    addRow(ch, d, q ? q.toFixed(2) : '', rate ? rate.toFixed(2) : '');
+  }
+}
+
+addRow(); // one empty row initially
+refreshChallanOptions();
+fillSupplier();
 </script>
 {% endblock %}
 """
@@ -753,16 +873,14 @@ def login():
         pwd  = request.form.get("password","").strip()
         remember = bool(request.form.get("remember"))
         if check_login_from_sheet(user, pwd):
-            session["user"] = user
-            session.permanent = remember
+            session["user"] = user;  session.permanent = remember
             return redirect(url_for("dashboard"))
         flash("Invalid ID or password.", "error")
     return render_template("login.html", PASS_TAB_NAME=PASS_TAB_NAME)
 
 @app.route("/logout")
 def logout():
-    session.clear()
-    return redirect(url_for("login"))
+    session.clear();  return redirect(url_for("login"))
 
 @app.route("/dashboard")
 @login_required
@@ -859,10 +977,11 @@ def challan():
 def invoice():
     firms     = load_firms()
     suppliers = load_suppliers()
+    challans  = load_challan_rows()   # for import dropdown
     firm_keys = list(firms.keys())
     if request.method == "GET":
         return render_template("invoice.html",
-                               firms=firms, suppliers=suppliers,
+                               firms=firms, suppliers=suppliers, challans=challans,
                                next_no=get_next_invoice_number(),
                                today=datetime.now().strftime("%d/%m/%Y"),
                                sac_default=SAC_DEFAULT,
@@ -914,7 +1033,6 @@ def invoice():
     # Log row-per-item to "Invoice"
     created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sub_total = sum(i[5] for i in items)
-    # Precompute round-off total once (apply to last row)
     gross_all = max(sub_total - discount, 0.0)
     cgst_all  = gross_all * (CGST_RATE/100.0)
     sgst_all  = gross_all * (SGST_RATE/100.0)
@@ -957,5 +1075,4 @@ def invoice():
 # Main
 # ==============================
 if __name__ == "__main__":
-    # Local dev: http://localhost:8080
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8080")), debug=True)
