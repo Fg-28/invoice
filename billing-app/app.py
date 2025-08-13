@@ -188,19 +188,18 @@ def write_invoice_mtr_to_challan(company_name, supplier_code, items):
     """
     try:
         ws = _ws(CHALLAN_TAB_NAME)
-        all_values = ws.get_all_values()  # list of lists
+        all_values = ws.get_all_values()
         if not all_values: return
         header = [h.strip() for h in all_values[0]]
         idx = {h:i for i,h in enumerate(header)}
-        # ensure target column exists
         if "INVOICE_MTR" not in idx:
             header.append("INVOICE_MTR")
             ws.update('A1', [header])
             all_values[0] = header
             idx = {h:i for i,h in enumerate(header)}
 
-        updates = []  # (row, col, value)
-        for row_num in range(2, len(all_values)+1):  # 1-based rows, skip header
+        updates = []
+        for row_num in range(2, len(all_values)+1):
             row = all_values[row_num-1]
             def get(col):
                 i = idx.get(col)
@@ -212,7 +211,7 @@ def write_invoice_mtr_to_challan(company_name, supplier_code, items):
             for (ch, d, sac, q, r, a) in items:
                 if (firm == company_name and scode == supplier_code and
                     str(ch).strip() == str(chno).strip() and (d or "").strip() == (desc or "").strip()):
-                    col = idx["INVOICE_MTR"] + 1  # 1-based col
+                    col = idx["INVOICE_MTR"] + 1
                     updates.append((row_num, col, f"{float(q):.2f}"))
                     break
 
@@ -663,7 +662,7 @@ TEMPLATES = {
 {% block content %}
 <h2>Create Challan</h2>
 
-<form method="post" class="card">
+<form id="challanForm" method="post" class="card">
   <div class="row">
     <div class="grow">
       <label>Firm</label><br>
@@ -711,11 +710,12 @@ TEMPLATES = {
   </table>
   <p><button type="button" class="btn small" onclick="addRow()">Add Row</button></p>
 
-  <button class="btn" type="submit">Generate PDF & Log</button>
+  <button id="ch_submit" class="btn" type="submit">Generate PDF & Log</button>
 </form>
 
 <script>
 const SUPPLIERS = {{ suppliers|tojson }};
+
 function fillParty(){
   const code = document.getElementById('ch_party_code').value;
   const s = SUPPLIERS[code]; if(!s) return;
@@ -737,6 +737,33 @@ function addRow(){
   document.querySelector('#items tbody').appendChild(tr);
 }
 addRow();
+
+// --- Submit via fetch -> download -> reset form ---
+document.getElementById('challanForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const btn = document.getElementById('ch_submit');
+  btn.disabled = true;
+  try{
+    const fd = new FormData(e.target);
+    const res = await fetch("{{ url_for('challan') }}", { method: "POST", body: fd, credentials: "same-origin" });
+    if(!res.ok) throw new Error("Failed to generate PDF");
+    const blob = await res.blob();
+    const dispo = res.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(dispo);
+    const fname = decodeURIComponent((m && (m[1]||m[2])) || 'challan.pdf');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = fname; document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+    // reset form (clear party and items)
+    e.target.reset();
+    document.querySelector('#items tbody').innerHTML = '';
+    addRow();
+  }catch(err){
+    alert(err.message || err);
+  }finally{
+    btn.disabled = false;
+  }
+});
 </script>
 {% endblock %}
 """,
@@ -745,7 +772,7 @@ addRow();
 {% block content %}
 <h2>Create Invoice</h2>
 
-<form method="post" class="card">
+<form id="invoiceForm" method="post" class="card">
   <div class="row">
     <div class="grow">
       <label>Firm</label><br>
@@ -821,7 +848,7 @@ addRow();
   </table>
   <p><button type="button" class="btn small" onclick="addRow()">Add Row</button></p>
 
-  <button class="btn" type="submit">Generate PDF & Log</button>
+  <button id="inv_submit" class="btn" type="submit">Generate PDF & Log</button>
 </form>
 
 <script>
@@ -887,6 +914,8 @@ function refreshChallanOptions(){
   });
 }
 
+function safeNum(v){ const n = Number(v); return isNaN(n)?0:n; }
+
 function addFromChallan(){
   const firm  = (document.getElementById('inv_firm').value || '').toUpperCase();
   const scode = document.getElementById('inv_supplier_code').value || '';
@@ -904,15 +933,52 @@ function addFromChallan(){
   for(const r of rows){
     if(current >= INV_MAX_ROWS) break;
     const desc = String(r['Description']||'');
-    const qty  = (r['Qty']!==undefined && r['Qty']!==null) ? String(r['Qty']) :
-                 (r['MTR']!==undefined && r['MTR']!==null) ? String(r['MTR']) : '';
-    addRow({ ch: chSel, desc: desc, qty: qty, rate: '' });
+    const qtyRaw = r.hasOwnProperty('Qty') ? r['Qty'] : (r.hasOwnProperty('MTR') ? r['MTR'] : '');
+    const qty = String(qtyRaw ?? '');
+    // Rate: prefer explicit 'Rate', else compute Amount / Qty (or MTR)
+    let rate = '';
+    if(r.hasOwnProperty('Rate') && r['Rate'] !== '' && r['Rate'] !== null){
+      rate = String(r['Rate']);
+    }else{
+      const amt = safeNum(r['Amount']);
+      const qn  = safeNum(qtyRaw);
+      if(qn > 0) rate = (amt / qn).toFixed(2);
+    }
+    addRow({ ch: chSel, desc: desc, qty: qty, rate: rate });
     current++;
   }
 }
 
 window.addEventListener('DOMContentLoaded', ()=>{
   refreshChallanOptions();
+});
+
+// --- Submit via fetch -> download -> reset form ---
+document.getElementById('invoiceForm').addEventListener('submit', async (e)=>{
+  e.preventDefault();
+  const btn = document.getElementById('inv_submit');
+  btn.disabled = true;
+  try{
+    const fd = new FormData(e.target);
+    const res = await fetch("{{ url_for('invoice') }}", { method: "POST", body: fd, credentials: "same-origin" });
+    if(!res.ok) throw new Error("Failed to generate PDF");
+    const blob = await res.blob();
+    const dispo = res.headers.get('Content-Disposition') || '';
+    const m = /filename\*=UTF-8''([^;]+)|filename="?([^"]+)"?/i.exec(dispo);
+    const fname = decodeURIComponent((m && (m[1]||m[2])) || 'invoice.pdf');
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = fname; document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); }, 500);
+    // reset form (clear supplier & items)
+    e.target.reset();
+    document.querySelector('#items tbody').innerHTML = '';
+    addRow();
+    refreshChallanOptions(); // refresh challan list after reset
+  }catch(err){
+    alert(err.message || err);
+  }finally{
+    btn.disabled = false;
+  }
 });
 </script>
 {% endblock %}
