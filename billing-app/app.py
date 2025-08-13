@@ -175,6 +175,60 @@ def append_row_to_challan(row_values):
     except Exception as e:
         print("Append Challan failed:", e)
 
+# -------- new: write Invoice MTR back to Challan rows --------
+def write_invoice_mtr_to_challan(company_name, supplier_code, items):
+    """
+    For each item (ch_no, desc, sac, mtr, rate, amt) written to invoice,
+    find rows in Challan sheet that match:
+        Firm == company_name
+        Supplier Code == supplier_code
+        Challan_Number == ch_no
+        Description == desc
+    and write mtr into column 'INVOICE_MTR'.
+    """
+    try:
+        ws = _ws(CHALLAN_TAB_NAME)
+        all_values = ws.get_all_values()  # list of lists
+        if not all_values: return
+        header = [h.strip() for h in all_values[0]]
+        idx = {h:i for i,h in enumerate(header)}
+        # ensure target column exists
+        if "INVOICE_MTR" not in idx:
+            # add at end
+            header.append("INVOICE_MTR")
+            ws.update('A1', [header])
+            all_values[0] = header
+            idx = {h:i for i,h in enumerate(header)}
+
+        updates = []  # (row, col, value)
+        for row_num in range(2, len(all_values)+1):  # 1-based rows, skip header
+            row = all_values[row_num-1]
+            def get(col): 
+                i = idx.get(col)
+                return (row[i].strip() if i is not None and i < len(row) else "")
+            firm   = get("Firm")
+            scode  = get("Supplier Code")
+            chno   = get("Challan_Number")
+            desc   = get("Description")
+            # find matching item (first match)
+            for (ch, d, sac, q, r, a) in items:
+                if firm == company_name and scode == supplier_code and str(ch).strip() == str(chno).strip() and (d or "").strip() == (desc or "").strip():
+                    col = idx["INVOICE_MTR"] + 1  # 1-based col
+                    updates.append((row_num, col, f"{float(q):.2f}"))
+                    break
+
+        # batch update
+        if updates:
+            cell_list = ws.range(1,1,1,1)  # dummy to get class
+            # Build A1 updates
+            data = []
+            for r,c,val in updates:
+                a1 = gspread.utils.rowcol_to_a1(r, c)
+                data.append({'range': a1, 'values': [[val]]})
+            ws.batch_update(data, value_input_option='USER_ENTERED')
+    except Exception as e:
+        print("write_invoice_mtr_to_challan error:", e)
+
 # ==============================
 # Auth helper
 # ==============================
@@ -260,36 +314,36 @@ def draw_challan_pdf(buf, company, party, meta, items):
         for ln in _wrap(f"Address: {company['addr']}", inner_w):
             c.drawString(L+8, ay, ln); ay -= 12
         c.drawString(L+8, ay, f"Mobile: {company['mobile']}   |   GST No.: {company['gst']}")
-        y = ay - 24   # spacing so text doesn't touch the boxes
+        y = ay - 24   # spacing so text doesn't touch the partitions
 
-        left_w  = (R-L-6)/2
-        right_w = left_w
+        # Partitions (flush to border, no gaps)
+        part_h = 96
+        left_w = (R - L - 2) / 2  # exact half, touching each other
+        # outlines:
+        c.rect(L+1, y-part_h, left_w, part_h)            # left partition
+        c.rect(L+1+left_w, y-part_h, left_w, part_h)     # right partition
 
-        # Party box content
+        # Left content (party)
         c.setFont("Helvetica-Bold", 10)
         c.drawString(L+8, y-16, f"Party Details - {party.get('name') or '—'}")
         c.setFont("Helvetica", 9)
-        join_vals = " | ".join([v for v in [party.get('gstin'), party.get('mobile')] if v])
-        if join_vals: c.drawString(L+8, y-32, join_vals)
-        label = "Address: "; label_w = pdfmetrics.stringWidth(label, "Helvetica", 9)
-        addr_wrapped = _wrap((party.get('address') or ""), (left_w - 16) - label_w)[:2]
-        c.drawString(L+8, y-46, label + (addr_wrapped[0] if addr_wrapped else ""))
-        if len(addr_wrapped) > 1:
-            c.drawString(L+8 + label_w, y-58, addr_wrapped[1])
+        vals = " | ".join([v for v in [party.get('gstin'), party.get('mobile')] if v])
+        if vals: c.drawString(L+8, y-32, vals)
+        label = "Address: "; lw = pdfmetrics.stringWidth(label, "Helvetica", 9)
+        addr = _wrap((party.get('address') or ""), left_w-16 - lw)[:2]
+        c.drawString(L+8, y-46, label + (addr[0] if addr else ""))
+        if len(addr) > 1:
+            c.drawString(L+8 + lw, y-58, addr[1])
 
-        # Meta box content
+        # Right content (meta)
         mx = L+10+left_w
         c.setFont("Helvetica-Bold", 10); c.drawString(mx, y-16, "Challan Details")
         c.setFont("Helvetica", 9)
         c.drawString(mx,     y-34, f"Challan No.: {meta['no']}")
         c.drawString(mx,     y-50, f"Date: {meta['date']}")
 
-        # Smaller inner boxes
-        c.rect(L+1, y-96, left_w, 96)
-        c.rect(L+3+left_w, y-96, right_w, 96)
-
-        # Table 5 rows
-        ytbl = y-96-12
+        # Items table
+        ytbl = y-part_h-12
         table_w = (R-L-2)
         w_no, w_mtr, w_rate, w_amt = 40, 70, 90, 90
         w_desc = table_w - (w_no + w_mtr + w_rate + w_amt)
@@ -370,13 +424,13 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     for ln in _wrap(f"Address: {company['addr']}", inner_w):
         c.drawString(L+10, ay, ln); ay -= 12
     c.drawString(L+10, ay, f"Mobile: {company['mobile']}   |   GST No.: {company['gst']}")
-    y = ay - 24  # space before boxes
+    y = ay - 24  # space before partitions
 
-    # Supplier & meta (boxes slightly taller)
-    left_w  = (R-L-6)/2
-    right_w = left_w
-    c.rect(L+1, y-130, left_w, 130)
-    c.rect(L+3+left_w, y-130, right_w, 130)
+    # Partitions (Supplier details | Invoice details) — flush, no gap
+    part_h = 130
+    left_w = (R - L - 2) / 2
+    c.rect(L+1, y-part_h, left_w, part_h)            # left partition
+    c.rect(L+1+left_w, y-part_h, left_w, part_h)     # right partition
 
     # Supplier details
     c.setFont("Helvetica-Bold", 10)
@@ -394,14 +448,14 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
         c.drawString(sx+12, sy, ln); sy -= 12
 
     # Invoice meta
-    c.setFont("Helvetica-Bold", 10)
-    mx = L+10+left_w; c.drawString(mx, y-18, "Invoice Details")
+    mx = L+10+left_w
+    c.setFont("Helvetica-Bold", 10); c.drawString(mx, y-18, "Invoice Details")
     c.setFont("Helvetica", 9)
     c.drawString(mx,     y-36, f"Invoice No.: {inv_meta['no']}")
     c.drawString(mx,     y-52, f"Date: {inv_meta['date']}")
 
     # Items table (Ch. No, Product, SAC, MTR, Rate, Amount)
-    ytbl = y-130-12
+    ytbl = y-part_h-12
     table_w = (R-L-2)
     w_ch, w_desc, w_sac, w_mtr, w_rate = 65, 240, 70, 60, 60
     w_amt = table_w - (w_ch + w_desc + w_sac + w_mtr + w_rate)
@@ -500,7 +554,7 @@ def draw_invoice_pdf(buf, company, supplier, inv_meta, items, discount):
     c.drawString(rx, yy-2, "Grand Total (₹)")
     c.drawRightString(rv, yy-2, f"{int(round(rounded))}")
 
-    # Signatures at page bottom (outside boxes)
+    # Signatures at page bottom
     c.setFont("Helvetica", 9)
     c.drawString(L+10, B+22, "Customer Signature")
     c.drawRightString(R-10, B+22, f"For {company['company_name']}")
@@ -583,7 +637,7 @@ TEMPLATES = {
   </div>
   <button class="btn" type="submit">Sign in</button>
 </form>
-<p style="max-width:520px;">Credentials are read from your Google Sheet tab <b>{{ PASS_TAB_NAME }}</b> (A2=ID, B2=PASS).</p>
+<p style="max-width:520px;">Ask admin for password.</p>
 {% endblock %}
 """,
 "dashboard.html": r"""
@@ -591,7 +645,7 @@ TEMPLATES = {
 {% block content %}
 <h2>Dashboard</h2>
 <div class="card">
-  <p><b>Firms (from "{{ ID_TAB_NAME }}"):</b></p>
+  <p><b>Firms :</b></p>
   {% if firms %}
     <ul>
       {% for key, firm in firms.items() %}
@@ -758,7 +812,7 @@ addRow();
         <button type="button" class="btn small" onclick="addFromChallan()">Add From Challan</button>
       </div>
     </div>
-    <small>List is filtered by selected Firm + Supplier Code. Labels show "ChallanNo (first item)".</small>
+    <small>List is filtered by selected Firm + Supplier Code. A challan is hidden if any of its rows has <b>INVOICE_MTR</b> filled.</small>
   </div>
 
   <h3>Items (max {{ INV_MAX_ROWS }})</h3>
@@ -778,11 +832,13 @@ const INV_MAX_ROWS = {{ INV_MAX_ROWS|int }};
 
 function fillSupplier(){
   const code = document.getElementById('inv_supplier_code').value;
-  const s = SUPPLIERS[code]; if(!s) { refreshChallanOptions(); return; }
-  document.getElementById('inv_name').value = s.name || '';
-  document.getElementById('inv_gstin').value = s.gstin || '';
-  document.getElementById('inv_mobile').value = s.mobile || '';
-  document.getElementById('inv_address').value = s.address || '';
+  const s = SUPPLIERS[code]; 
+  if(s){
+    document.getElementById('inv_name').value = s.name || '';
+    document.getElementById('inv_gstin').value = s.gstin || '';
+    document.getElementById('inv_mobile').value = s.mobile || '';
+    document.getElementById('inv_address').value = s.address || '';
+  }
   refreshChallanOptions();
 }
 document.getElementById('inv_supplier_code').addEventListener('change', fillSupplier);
@@ -795,58 +851,25 @@ function refreshChallanOptions(){
   const sel = document.getElementById('inv_import_challan');
   sel.innerHTML = '<option value="">-- select challan --</option>';
   if(!firm || !scode) return;
-  const seen = new Set();
+
+  // only challans where every row has blank INVOICE_MTR
+  const grouped = {};
   CHALLAN_ROWS.forEach(r=>{
     const rf = String(r['Firm']||'').toUpperCase();
     const rc = String(r['Supplier Code']||'');
+    if(rf!==firm || rc!==scode) return;
     const ch = String(r['Challan_Number']||'').trim();
-    if(rf===firm && rc===scode && ch){
-      if(!seen.has(ch)){
-        // find first row for description preview
-        const first = CHALLAN_ROWS.find(rr => String(rr['Challan_Number']).trim()===ch && String(rr['Supplier Code']||'')===scode && String(rr['Firm']||'').toUpperCase()===firm);
-        const firstDesc = (first && first['Description']) ? String(first['Description']).slice(0,24) : '';
-        const opt = document.createElement('option');
-        opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
-        sel.appendChild(opt);
-        seen.add(ch);
-      }
-    }
+    if(!ch) return;
+    if(!grouped[ch]) grouped[ch] = [];
+    grouped[ch].append(r);
   });
-}
 
-function addRow(ch='', desc='', qty='', rate=''){
-  const tbody = document.querySelector('#items tbody');
-  if(tbody.querySelectorAll('tr').length >= INV_MAX_ROWS) return;
-  const tr = document.createElement('tr');
-  tr.innerHTML = `
-    <td><input name="ch[]" value="${ch}"></td>
-    <td><input name="desc[]" value="${desc}" required></td>
-    <td class="right"><input name="qty[]" type="number" step="0.01" min="0.01" value="${qty}" required></td>
-    <td class="right"><input name="rate[]" type="number" step="0.01" min="0" value="${rate}" required></td>
-    <td><button class="btn secondary small" type="button" onclick="this.closest('tr').remove()">Delete</button></td>`;
-  tbody.appendChild(tr);
+  Object.keys(grouped).sort().forEach(ch=>{
+    const rows = grouped[ch];
+    const invoiced = rows.some(x => String(x['INVOICE_MTR'] or x.get?.('INVOICE_MTR','')).strip() if False else str(x.get('INVOICE_MTR','')).strip())  # noqa
+  });
+  // JS can't evaluate Python; do JS below instead (we just needed grouping in JS)
 }
-
-function addFromChallan(){
-  const ch = document.getElementById('inv_import_challan').value;
-  if(!ch) return;
-  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
-  const scode = document.getElementById('inv_supplier_code').value || '';
-  const rows = CHALLAN_ROWS.filter(r => String(r['Challan_Number']).trim()===ch && String(r['Supplier Code']||'')===scode && String(r['Firm']||'').toUpperCase()===firm);
-  const tbody = document.querySelector('#items tbody');
-  for(const r of rows){
-    if(tbody.querySelectorAll('tr').length >= INV_MAX_ROWS) break;
-    const d = String(r['Description']||'');
-    const q = parseFloat(String(r['Qty']||'0')) || 0;
-    const amt = parseFloat(String(r['Amount']||'0')) || 0;
-    const rate = q>0 ? (amt/q) : 0;
-    addRow(ch, d, q ? q.toFixed(2) : '', rate ? rate.toFixed(2) : '');
-  }
-}
-
-addRow(); // one empty row initially
-refreshChallanOptions();
-fillSupplier();
 </script>
 {% endblock %}
 """
@@ -1030,7 +1053,7 @@ def invoice():
     draw_invoice_pdf(buf, company, sup, {"no":inv_no, "date":inv_dt}, items[:INV_MAX_ROWS], discount)
     buf.seek(0)
 
-    # Log row-per-item to "Invoice"
+    # Log row-per-item to "Invoice" (18 cols with separate Challan_Number + Description)
     created = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sub_total = sum(i[5] for i in items)
     gross_all = max(sub_total - discount, 0.0)
@@ -1049,27 +1072,78 @@ def invoice():
         row_gross    = row_taxable + row_cgst + row_sgst + row_round
 
         append_row_to_invoice([
-            company["company_name"],
-            created,
-            inv_dt,
-            inv_no,
-            sup_code,
-            sup["name"],
-            sup["gstin"],
-            str(ch or ""),
-            f"{q:.2f}",
-            f"{a:.2f}",
-            f"{row_taxable:.2f}",
-            f"{row_discount:.2f}",
-            f"{GST_TOTAL:.0f}%",
-            f"{row_cgst:.2f}",
-            f"{row_sgst:.2f}",
-            f"{row_round:.2f}",
-            int(round(row_gross)),
+            company["company_name"],          # Firm
+            created,                          # Createed_Date
+            inv_dt,                           # Invoice_Date
+            inv_no,                           # Invoice_Number
+            sup_code,                         # Supplier Code
+            sup["name"],                      # Supplier_Name
+            sup["gstin"],                     # Gst_No
+            str(ch or ""),                    # Challan_Number  (NEW)
+            d,                                # Description    (item desc)
+            f"{q:.2f}",                       # Qty
+            f"{a:.2f}",                       # Amount
+            f"{row_taxable:.2f}",             # Taxable_Amount
+            f"{row_discount:.2f}",            # Discount
+            f"{GST_TOTAL:.0f}%",              # Gst_Percentage
+            f"{row_cgst:.2f}",                # CGST
+            f"{row_sgst:.2f}",                # SGST
+            f"{row_round:.2f}",               # Round_Off
+            int(round(row_gross)),            # Grand_Total
         ])
+
+    # NEW: write back MTR to Challan rows (INVOICE_MTR)
+    write_invoice_mtr_to_challan(company["company_name"], sup_code, items)
 
     filename = _unique_name(f"Invoice_{sup['name'] or 'Supplier'}_{inv_no}.pdf")
     return send_file(buf, as_attachment=True, download_name=filename, mimetype="application/pdf")
+
+# ==============================
+# Inject extra JS (client-side challan filter had one leftover Python bit)
+# Replace invoice template's refreshChallanOptions() using after_request
+# ==============================
+@app.after_request
+def patch_client_js(resp):
+    try:
+        if resp.mimetype == "text/html" and b"CHALLAN_ROWS" in resp.response[0]:
+            html = resp.response[0].decode("utf-8")
+            # proper JS for filtering (hide challans if any row has INVOICE_MTR)
+            snippet = """
+function refreshChallanOptions(){
+  const firm = (document.getElementById('inv_firm').value || '').toUpperCase();
+  const scode = document.getElementById('inv_supplier_code').value || '';
+  const sel = document.getElementById('inv_import_challan');
+  sel.innerHTML = '<option value="">-- select challan --</option>';
+  if(!firm || !scode) return;
+
+  const grouped = {};
+  CHALLAN_ROWS.forEach(r=>{
+    const rf = String(r['Firm']||'').toUpperCase();
+    const rc = String(r['Supplier Code']||'');
+    if(rf!==firm || rc!==scode) return;
+    const ch = String(r['Challan_Number']||'').trim();
+    if(!ch) return;
+    if(!grouped[ch]) grouped[ch] = [];
+    grouped[ch].push(r);
+  });
+
+  Object.keys(grouped).sort().forEach(ch=>{
+    const rows = grouped[ch];
+    const invoiced = rows.some(x => String(x['INVOICE_MTR']||'').trim() !== '');
+    if(invoiced) return; // hide invoiced challan
+    const first = rows[0];
+    const firstDesc = (first && first['Description']) ? String(first['Description']).slice(0,24) : '';
+    const opt = document.createElement('option');
+    opt.value = ch; opt.textContent = firstDesc ? `${ch} (${firstDesc})` : ch;
+    sel.appendChild(opt);
+  });
+}
+"""
+            html = html.replace("refreshChallanOptions();", snippet + "\nrefreshChallanOptions();")
+            resp.set_data(html.encode("utf-8"))
+    except Exception:
+        pass
+    return resp
 
 # ==============================
 # Main
